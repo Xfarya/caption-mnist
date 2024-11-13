@@ -8,36 +8,35 @@ import wandb
 
 from encoderdecoder import Encoder, Decoder
 
-# Define the Combine dataset
-class Combine(torch.utils.data.Dataset):
+class CombineDataset(torch.utils.data.Dataset):
     def __init__(self):
         super().__init__()
-        self.tf = torchvision.transforms.ToTensor()
-        self.ds = torchvision.datasets.MNIST(root='.', download=True, transform=self.tf)
-        self.ln = len(self.ds)
-
+        self.transform = torchvision.transforms.ToTensor()
+        self.dataset = torchvision.datasets.MNIST(root='.', download=True, transform=self.transform)
+        self.length = len(self.dataset)
+    
     def __len__(self):
-        return self.ln
-
+        return self.length
+    
     def __getitem__(self, idx):
-        idx = random.sample(range(self.ln), 4)
-        store = []
-        label = []
-
-        for i in idx:
-            x, y = self.ds[i]
-            store.append(x)
-            label.append(y)
-
-        img = torch.zeros((1, 56, 56))
-        img[:, 0:28, 0:28] = store[0]
-        img[:, 0:28, 28:56] = store[1]
-        img[:, 28:56, 0:28] = store[2]
-        img[:, 28:56, 28:56] = store[3]
-
-        label = torch.tensor(label, dtype=torch.long)  # Convert label list to tensor
-
-        return img, label
+        indices = random.sample(range(self.length), 4)
+        images = []
+        labels = []
+        
+        for i in indices:
+            image, label = self.dataset[i]
+            images.append(image)
+            labels.append(label)
+        
+        # Combine four images into one 56x56 image
+        combined_image = torch.zeros((1, 56, 56))
+        combined_image[:, 0:28, 0:28] = images[0]
+        combined_image[:, 0:28, 28:56] = images[1]
+        combined_image[:, 28:56, 0:28] = images[2]
+        combined_image[:, 28:56, 28:56] = images[3]
+        
+        labels = torch.tensor(labels, dtype=torch.long)  # [sequence_length]
+        return combined_image, labels  # [1, 56, 56], [4]
 
 # Model parameters
 vocab_size = 10
@@ -45,11 +44,13 @@ dim_size = 64
 batch_size = 8
 num_epochs = 10
 sequence_length = 4
-num_heads = 8  # Number of attention heads
-num_layers = 3  # Number of stacked layers
+num_heads = 8
+num_layers = 3
+learning_rate = 0.001
+max_batches = 100
 
 # Initialize W&B project
-wandb.init(project="caption-mnist", name="multi-head-attention-stacking")
+wandb.init(project="caption-mnist", name="transformer-mnist")
 
 wandb.config = {
     "epochs": num_epochs,
@@ -58,80 +59,69 @@ wandb.config = {
     "dim_size": dim_size,
     "num_heads": num_heads,
     "num_layers": num_layers,
-    "learning_rate": 0.001,
+    "learning_rate": learning_rate,
+    "max_batches": max_batches
 }
 
-# Initialize Encoder and Decoder with multi-head attention and stacking
+# Initialize models
 encoder = Encoder(dim_size, num_heads, num_layers)
 decoder = Decoder(vocab_size, dim_size, num_heads, num_layers)
 
-# Move models to GPU if available
+# Move models to device
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 encoder.to(device)
 decoder.to(device)
 
-# Initialize the Combine dataset and DataLoader with default collate_fn
-ds = Combine()
-dataloader = DataLoader(ds, batch_size=batch_size, shuffle=True)
+# Prepare dataset and dataloader
+dataset = CombineDataset()
+dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
-# Define loss function and optimizer
+# Define loss and optimizer
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(
-    list(encoder.parameters()) + list(decoder.parameters()), lr=wandb.config["learning_rate"]
+    list(encoder.parameters()) + list(decoder.parameters()), lr=learning_rate
 )
 
-# Training loop for multiple batches
+# Training loop
 for epoch in range(num_epochs):
     encoder.train()
     decoder.train()
     total_loss = 0
-
-    max_batches = 100  # Limit the number of batches per epoch for faster testing
-
+    
     for batch_idx, (images, labels) in enumerate(dataloader):
         if batch_idx >= max_batches:
-            break
-
+                break 
         optimizer.zero_grad()
-
-        # Move data to the appropriate device
-        images = images.to(device)
-        labels = labels.to(device)
-
-        # Encode the batch of combined images
-        encoder_output = encoder(images)  # Shape: [batch_size, encoder_seq_len, dim_size]
-
+        
+        # Move data to device
+        images = images.to(device)  # [batch_size, 1, 56, 56]
+        labels = labels.to(device)  # [batch_size, sequence_length]
+        
+        # Forward pass through encoder
+        encoder_output = encoder(images)  # [batch_size, encoder_seq_len, dim_size]
+        
         # Prepare decoder input (<START> tokens)
         decoder_input = torch.zeros(batch_size, sequence_length, dtype=torch.long, device=device)
-
-        # Prepare targets
-        # labels: [batch_size, sequence_length]
-        targets = labels  # Shape: [batch_size, sequence_length]
-
-        # Pass through the decoder
-        output = decoder(decoder_input, encoder_output)  # Output shape: [batch_size, sequence_length, vocab_size]
-
+        
+        # Forward pass through decoder
+        output = decoder(decoder_input, encoder_output)  # [batch_size, sequence_length, vocab_size]
+        
         # Compute loss
-        output_logits = output.view(-1, vocab_size)  # Shape: [batch_size * sequence_length, vocab_size]
-        flattened_targets = targets.contiguous().view(-1)  # Shape: [batch_size * sequence_length]
-
-        loss = criterion(output_logits, flattened_targets)
+        loss = criterion(output.view(-1, vocab_size), labels.view(-1))
         loss.backward()
         optimizer.step()
-
+        
         total_loss += loss.item()
-
-        # Log batch loss to W&B
+        
+        # Log batch loss
         wandb.log({
             "batch_loss": loss.item(),
-            "batch_idx": batch_idx + 1,
             "epoch": epoch + 1
         })
-
-        print(f"Epoch [{epoch + 1}/{num_epochs}], Batch [{batch_idx + 1}/{max_batches}], Loss: {loss.item():.4f}")
-
-    avg_loss = total_loss / (batch_idx + 1)
-
+        
+        print(f"Epoch [{epoch + 1}/{num_epochs}], Batch [{batch_idx + 1}], Loss: {loss.item():.4f}")
+    
+    avg_loss = total_loss / len(dataloader)
     wandb.log({
         "epoch_loss": avg_loss,
         "epoch": epoch + 1
