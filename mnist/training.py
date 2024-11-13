@@ -1,20 +1,50 @@
-import torch.optim as optim
 import torch
+import torch.optim as optim
 import torch.nn as nn
+from torch.utils.data import DataLoader
+import torchvision
+import random
+import wandb
 
 from encoderdecoder import Decoder, Encoder
 
-import wandb
+# Define the Combine dataset
+class Combine(torch.utils.data.Dataset):
+    def __init__(self):
+        super().__init__()
+        self.tf = torchvision.transforms.ToTensor()
+        self.ds = torchvision.datasets.MNIST(root='.', download=True, transform=self.tf)
+        self.ln = len(self.ds)
+
+    def __len__(self):
+        return self.ln
+
+    def __getitem__(self, idx):
+        idx = random.sample(range(self.ln), 4)
+        store = []
+        label = []
+
+        for i in idx:
+            x, y = self.ds[i]
+            store.append(x)
+            label.append(y)
+
+        img = torch.zeros((1, 56, 56))
+        img[:, 0:28, 0:28] = store[0]   
+        img[:, 0:28, 28:56] = store[1]
+        img[:, 28:56, 0:28] = store[2]
+        img[:, 28:56, 28:56] = store[3]
+
+        return img, label
 
 # Model parameters
 vocab_size = 10
 dim_size = 64
-seq_length = 5
-batch_size = 1
-num_epochs = 10
+batch_size = 1  # Use 1 batch size to get one combined image of 4 digits
+num_epochs = 500
 
 # Initialize W&B project
-wandb.init(project="caption-mnist", name="1. initial")  # Customize the project and experiment names
+wandb.init(project="caption-mnist", name="single-image-test")
 
 wandb.config = {
     "epochs": num_epochs,
@@ -24,85 +54,68 @@ wandb.config = {
     "learning_rate": 0.001,
 }
 
-
 # Initialize Encoder and Decoder
-encoder = Encoder(vocab_size, dim_size)
+encoder = Encoder(dim_size)
 decoder = Decoder(vocab_size, dim_size)
 
-# Define a sample input and target sequence
-input_sequence = torch.tensor([[1, 2, 3, 4, 5]])  # Shape: [1, 5]
-target_sequence = torch.tensor([[2, 3, 4, 5, 6]])  # Shape: [1, 5]
+# Initialize the Combine dataset and DataLoader with batch_size=1
+ds = Combine()
+dataloader = DataLoader(ds, batch_size=batch_size, shuffle=True)
 
-# Print shapes after definition
-print("Initial shape of input_sequence:", input_sequence.shape)      # Expected: [1, 5]
-print("Initial shape of target_sequence:", target_sequence.shape)    # Expected: [1, 5]
-
-# Loss function and optimizer
+# Define loss function and optimizer
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=0.001)
 
-# Training loop
+# Training loop for 1 combined image (one batch) only
 for epoch in range(num_epochs):
     encoder.train()
     decoder.train()
-    optimizer.zero_grad()
+    total_loss = 0
 
-    # Encode the input sequence
-    encoded_output = encoder(input_sequence)
+    # Only process a single batch and then break
+    for batch_idx, (images, labels) in enumerate(dataloader):
+        if batch_idx > 0:
+            break  # Stop after one batch
+        
+        optimizer.zero_grad()
 
-    # Initialize the decoder with the <START> token
-    decoder_input = torch.tensor([[0]], device=input_sequence.device)
+        # Encode the input single combined image
+        encoded_output = encoder(images)
 
-    # Store output logits
-    output_logits = []
+        # Initialize the decoder with the <START> token
+        decoder_input = torch.zeros((batch_size, 1), dtype=torch.long)
 
-    # Print shape of target_sequence before accessing its length
-    print(f"Epoch {epoch+1}, target_sequence shape before loop:", target_sequence.shape)
+        # Initialize empty list for output logits
+        output_logits = []
 
-    # Sequential decoding loop for each token position
-    for i in range(target_sequence.size(1)):  # Using target sequence length dynamically
-        logits = decoder(decoder_input, encoded_output)
-        output_logits.append(logits)
+        # Loop through each label index based on the actual length of `labels[0]`
+        for i in range(len(labels[0])):  # Use the number of labels in the first (and only) list in the batch
+            logits = decoder(decoder_input, encoded_output)  # Decoder output for the current token
+            output_logits.append(logits.squeeze(1))  # Remove extra dimension to ensure shape [batch_size, vocab_size]
 
-        # Choose the highest probability token
-        _, next_token = logits.max(dim=-1)
-        decoder_input = next_token  # Use generated token as the next input
+            # Update decoder_input with the next token in the sequence
+            decoder_input = torch.tensor([labels[0][i]], device=logits.device).unsqueeze(1)
 
-    # Concatenate logits and reshape for loss calculation
-    output_logits = torch.cat(output_logits, dim=1)  # Shape: [batch_size, sequence_length, vocab_size]
-    output_logits = output_logits.view(-1, vocab_size)  # Flatten to [batch_size * sequence_length, vocab_size]
+        # Stack logits along the sequence length dimension
+        output_logits = torch.stack(output_logits, dim=0).view(-1, vocab_size)  # Expected shape: [4, vocab_size]
 
-    # Create a separate variable for flattened target_sequence
-    flattened_target = target_sequence.view(-1)  # Flatten to [batch_size * sequence_length]
-    print("Shape of flattened_target before loss:", flattened_target.shape)  # Expected: [5]
+        # Flatten target labels to match output_logits
+        flattened_target = torch.tensor(labels[0], device=logits.device).view(-1)  # Expected shape: [4]
 
-    # Calculate loss
-    loss = criterion(output_logits, flattened_target)
-    loss.backward()
-    optimizer.step()
+        # Debug print statements for shape verification
+        print(f"output_logits shape: {output_logits.shape}")  # Expected: [4, vocab_size]
+        print(f"flattened_target shape: {flattened_target.shape}")  # Expected: [4]
 
-    wandb.log({"epoch": epoch + 1, "loss": loss.item()})
+        # Calculate loss
+        loss = criterion(output_logits, flattened_target)
 
-    print(f"Epoch {epoch+1}/{num_epochs}, Loss: {loss.item()}")
+        loss.backward()
+        optimizer.step()
+
+        total_loss += loss.item()
+
+    avg_loss = total_loss
+    wandb.log({"epoch": epoch + 1, "loss": avg_loss})
+    print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {avg_loss}")
 
 wandb.finish()
-
-# Testing the model after training
-print("\nGenerating sequence after training...\n")
-encoder.eval()
-decoder.eval()
-
-with torch.no_grad():
-    encoded_output = encoder(input_sequence)
-    decoder_input = torch.tensor([[0]], device=input_sequence.device)  # <START> token
-    generated_sequence = []
-
-    for _ in range(seq_length):
-        logits = decoder(decoder_input, encoded_output)
-        _, next_token = logits.max(dim=-1)
-        generated_sequence.append(next_token.item())
-        decoder_input = next_token
-
-print("Input sequence:", input_sequence.tolist())
-print("Target sequence:", target_sequence.view(-1).tolist())
-print("Generated sequence:", generated_sequence)
