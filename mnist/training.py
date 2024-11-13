@@ -4,11 +4,26 @@ import torch.nn as nn
 
 from encoderdecoder import Decoder, Encoder
 
+import wandb
+
 # Model parameters
 vocab_size = 10
 dim_size = 64
 seq_length = 5
 batch_size = 1
+num_epochs = 10
+
+# Initialize W&B project
+wandb.init(project="caption-mnist", name="1. initial")  # Customize the project and experiment names
+
+wandb.config = {
+    "epochs": num_epochs,
+    "batch_size": batch_size,
+    "vocab_size": vocab_size,
+    "dim_size": dim_size,
+    "learning_rate": 0.001,
+}
+
 
 # Initialize Encoder and Decoder
 encoder = Encoder(vocab_size, dim_size)
@@ -27,7 +42,6 @@ criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(list(encoder.parameters()) + list(decoder.parameters()), lr=0.001)
 
 # Training loop
-num_epochs = 10
 for epoch in range(num_epochs):
     encoder.train()
     decoder.train()
@@ -67,8 +81,11 @@ for epoch in range(num_epochs):
     loss.backward()
     optimizer.step()
 
+    wandb.log({"epoch": epoch + 1, "loss": loss.item()})
+
     print(f"Epoch {epoch+1}/{num_epochs}, Loss: {loss.item()}")
 
+wandb.finish()
 
 # Testing the model after training
 print("\nGenerating sequence after training...\n")
