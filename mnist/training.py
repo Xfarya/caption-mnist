@@ -6,7 +6,7 @@ import torchvision
 import random
 import wandb
 
-from encoderdecoder import Decoder, Encoder
+from encoderdecoder import Encoder, Decoder
 
 # Define the Combine dataset
 class Combine(torch.utils.data.Dataset):
@@ -45,21 +45,28 @@ dim_size = 64
 batch_size = 8
 num_epochs = 10
 sequence_length = 4
+num_heads = 8  # Number of attention heads
 
 # Initialize W&B project
-wandb.init(project="caption-mnist", name="multi-batch-test-debug")
+wandb.init(project="caption-mnist", name="multi-head-attention-test")
 
 wandb.config = {
     "epochs": num_epochs,
     "batch_size": batch_size,
     "vocab_size": vocab_size,
     "dim_size": dim_size,
+    "num_heads": num_heads,
     "learning_rate": 0.001,
 }
 
-# Initialize Encoder and Decoder
-encoder = Encoder(dim_size)
-decoder = Decoder(vocab_size, dim_size)
+# Initialize Encoder and Decoder with multi-head attention
+encoder = Encoder(dim_size, num_heads)
+decoder = Decoder(vocab_size, dim_size, num_heads)
+
+# Move models to GPU if available
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+encoder.to(device)
+decoder.to(device)
 
 # Initialize the Combine dataset and DataLoader with default collate_fn
 ds = Combine()
@@ -77,80 +84,56 @@ for epoch in range(num_epochs):
     decoder.train()
     total_loss = 0
 
-    max_batches = 100
+    max_batches = 100  # Limit the number of batches per epoch for faster testing
 
     for batch_idx, (images, labels) in enumerate(dataloader):
-        print(f"\nBatch {batch_idx + 1}")
-
         if batch_idx >= max_batches:
             break
 
         optimizer.zero_grad()
 
+        # Move data to the appropriate device
+        images = images.to(device)
+        labels = labels.to(device)
+
         # Encode the batch of combined images
-        encoded_output = encoder(images)  # Shape: [batch_size, dim_size]
-        print(f"Encoded output shape: {encoded_output.shape}")  # Expected: [batch_size, dim_size]
+        encoder_output = encoder(images)  # Shape: [batch_size, encoder_seq_len, dim_size]
 
-        # Ensure labels are tensors with the correct shape
-        print(f"Labels shape: {labels.shape}")  # Expected: [batch_size, sequence_length]
+        # Prepare decoder input (<START> tokens)
+        decoder_input = torch.zeros(batch_size, sequence_length, dtype=torch.long, device=device)
 
-        # Initialize lists to collect logits and targets
-        batch_logits = []
-        batch_targets = []
+        # Prepare targets
+        # labels: [batch_size, sequence_length]
+        targets = labels  # Shape: [batch_size, sequence_length]
 
-        # Process each sample in the batch
-        for i in range(batch_size):
-            single_encoded_output = encoded_output[i].unsqueeze(0)  # Shape: [1, dim_size]
-            single_label = labels[i]  # Tensor of shape [sequence_length]
+        # Pass through the decoder
+        output = decoder(decoder_input, encoder_output)  # Output shape: [batch_size, sequence_length, vocab_size]
 
-            decoder_input = torch.zeros((1, 1), dtype=torch.long, device=single_encoded_output.device)
+        # Compute loss
+        output_logits = output.view(-1, vocab_size)  # Shape: [batch_size * sequence_length, vocab_size]
+        flattened_targets = targets.contiguous().view(-1)  # Shape: [batch_size * sequence_length]
 
-            # Collect logits for this sequence
-            sample_logits = []
+        loss = criterion(output_logits, flattened_targets)
+        loss.backward()
+        optimizer.step()
 
-            for j in range(sequence_length):
-                logits = decoder(decoder_input, single_encoded_output)  # Shape: [1, 1, vocab_size]
-                sample_logits.append(logits.squeeze(1))  # Shape: [1, vocab_size]
+        total_loss += loss.item()
 
-                # Update decoder input with the next token
-                decoder_input = single_label[j].unsqueeze(0).unsqueeze(0)  # Shape: [1, 1]
+        # Log batch loss to W&B
+        wandb.log({
+            "batch_loss": loss.item(),
+            "batch_idx": batch_idx + 1,
+            "epoch": epoch + 1
+        })
 
-            # Stack and store logits and labels for this sample
-            sample_logits = torch.cat(sample_logits, dim=0)  # Shape: [sequence_length, vocab_size]
-            batch_logits.append(sample_logits)  # Collect logits
-            batch_targets.append(single_label)  # Collect labels
+        print(f"Epoch [{epoch + 1}/{num_epochs}], Batch [{batch_idx + 1}/{max_batches}], Loss: {loss.item():.4f}")
 
-        # Concatenate logits and targets for the batch
-        output_logits = torch.cat(batch_logits, dim=0)  # Shape: [batch_size * sequence_length, vocab_size]
-        flattened_target = torch.cat(batch_targets, dim=0)  # Shape: [batch_size * sequence_length]
+    avg_loss = total_loss / (batch_idx + 1)
 
-        print(f"Final output_logits shape: {output_logits.shape}")  # Should match target shape
-        print(f"Final flattened_target shape: {flattened_target.shape}")
-
-        # Calculate and backpropagate loss
-        if output_logits.shape[0] == flattened_target.shape[0]:
-            loss = criterion(output_logits, flattened_target)
-            loss.backward()
-            optimizer.step()
-            total_loss += loss.item()
-            print(f"Batch {batch_idx + 1} Loss: {loss.item()}")
-        else:
-            print("Shape mismatch between logits and targets; skipping batch.")
-    
-    # Log batch loss to W&B
-    wandb.log({
-        "batch_loss": loss.item(),
-        "batch_idx": batch_idx + 1,
-        "epoch": epoch + 1
-    })
-    
-    avg_loss = total_loss / len(dataloader)
-    
     wandb.log({
         "epoch_loss": avg_loss,
         "epoch": epoch + 1
     })
-    print(f"Epoch {epoch + 1}/{num_epochs}, Loss: {avg_loss}")
-
+    print(f"Epoch [{epoch + 1}/{num_epochs}] completed. Average Loss: {avg_loss:.4f}")
 
 wandb.finish()
