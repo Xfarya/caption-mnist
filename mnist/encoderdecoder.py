@@ -39,7 +39,7 @@ class Encoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    def __init__(self, vocab_size, dim_size, seq_length):
+    def __init__(self, vocab_size, dim_size):
         super(Decoder, self).__init__()
         self.emb = nn.Embedding(vocab_size, dim_size)
         self.w_q = nn.Linear(dim_size, dim_size)
@@ -90,10 +90,10 @@ dim_size = 64
 x = torch.tensor([1, 2, 3, 4])  # Sample input
 
 encoder = Encoder(vocab_size, dim_size)
-decoder = Decoder(vocab_size, dim_size, seq_length=5)
+decoder = Decoder(vocab_size, dim_size)
 
 # Pass data through Encoder
 encoded_output = encoder(x)  # Shape: [sequence_length, 64]
 
 # Use encoded output in Decoder (assuming x is the input for decoding)
-output = decoder(x)
+output = decoder(x, encoded_output)
