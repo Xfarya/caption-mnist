@@ -3,17 +3,17 @@ from numpy import sqrt
 import torch
 
 class Encoder(nn.Module):
-    def __init__(self):
+    def __init__(self, vocab_size, dim_size):
         super(Encoder, self).__init__()
-        self.emb = nn.Embedding(10000, 64)
-        self.w_q = nn.Linear(64, 64)
-        self.w_k = nn.Linear(64, 64)
-        self.w_v = nn.Linear(64, 64)
+        self.emb = nn.Embedding(vocab_size, dim_size)
+        self.w_q = nn.Linear(dim_size, dim_size)
+        self.w_k = nn.Linear(dim_size, dim_size)
+        self.w_v = nn.Linear(dim_size, dim_size)
 
         # Feed-forward network with expansion
-        self.input_proj = nn.Linear(64, 256)
+        self.input_proj = nn.Linear(dim_size, (dim_size*4))
         self.relu = nn.ReLU()
-        self.output_proj = nn.Linear(256, 64)
+        self.output_proj = nn.Linear((dim_size*4), dim_size)
     
     def forward(self, x):
         emb = self.emb(x)  # Embedding the input
@@ -35,34 +35,33 @@ class Encoder(nn.Module):
         updated = self.relu(updated)
         updated = self.output_proj(updated)
 
-        # Debug print statements
-        print("Probabilities:\n", probs)
-        print("Updated:\n", updated)
-
         return updated
 
 
 class Decoder(nn.Module):
-    def __init__(self):
+    def __init__(self, vocab_size, dim_size, seq_length):
         super(Decoder, self).__init__()
-        self.emb = nn.Embedding(5, 64)
-        self.w_q = nn.Linear(64, 64)
-        self.w_k = nn.Linear(64, 64)
-        self.w_v = nn.Linear(64, 64)
+        self.emb = nn.Embedding(vocab_size, dim_size)
+        self.w_q = nn.Linear(dim_size, dim_size)
+        self.w_k = nn.Linear(dim_size, dim_size)
+        self.w_v = nn.Linear(dim_size, dim_size)
 
         # Feed-forward network with expansion
-        self.input_proj = nn.Linear(64, 256)
+        self.input_proj = nn.Linear(dim_size, (dim_size*4))
         self.relu = nn.ReLU()
-        self.output_proj = nn.Linear(256, 64)
+        self.output_proj = nn.Linear((dim_size*4), dim_size)
+
+        # Final projection to vocabulary size
+        self.vocab_proj = nn.Linear(dim_size, vocab_size)
     
-    def forward(self, x):
+    def forward(self, x, encoded_output):
         emb = self.emb(x)  # Embedding the input
         Q = self.w_q(emb)
-        K = self.w_k(emb)
-        V = self.w_v(emb)
+        K = self.w_k(encoded_output)
+        V = self.w_v(encoded_output)
         
         # Compute scaled dot-product attention
-        attention = Q @ K.transpose(-2, -1) / sqrt(64)
+        attention = Q @ K.transpose(-2, -1) / sqrt(K.size(-1))
         
         # Create a mask for the upper triangular part (future positions)
         mask = torch.triu(torch.full_like(attention, float("-inf")), diagonal=1)
@@ -81,13 +80,20 @@ class Decoder(nn.Module):
         updated = self.relu(updated)
         updated = self.output_proj(updated)
 
-        # Debug print statements
-        print("Mask:\n", mask)
-        print("Probabilities:\n", probs)
+        logits = self.vocab_proj(updated)
 
-        return updated
+        return logits
 
-# Example usage
+# Example usage of Encoder and Decoder together
+vocab_size = 10
+dim_size = 64
 x = torch.tensor([1, 2, 3, 4])  # Sample input
-decoder = Decoder()
+
+encoder = Encoder(vocab_size, dim_size)
+decoder = Decoder(vocab_size, dim_size, seq_length=5)
+
+# Pass data through Encoder
+encoded_output = encoder(x)  # Shape: [sequence_length, 64]
+
+# Use encoded output in Decoder (assuming x is the input for decoding)
 output = decoder(x)
