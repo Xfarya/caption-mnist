@@ -46,9 +46,10 @@ batch_size = 8
 num_epochs = 10
 sequence_length = 4
 num_heads = 8  # Number of attention heads
+num_layers = 3  # Number of stacked layers
 
 # Initialize W&B project
-wandb.init(project="caption-mnist", name="multi-head-attention-test")
+wandb.init(project="caption-mnist", name="multi-head-attention-stacking")
 
 wandb.config = {
     "epochs": num_epochs,
@@ -56,12 +57,13 @@ wandb.config = {
     "vocab_size": vocab_size,
     "dim_size": dim_size,
     "num_heads": num_heads,
+    "num_layers": num_layers,
     "learning_rate": 0.001,
 }
 
-# Initialize Encoder and Decoder with multi-head attention
-encoder = Encoder(dim_size, num_heads)
-decoder = Decoder(vocab_size, dim_size, num_heads)
+# Initialize Encoder and Decoder with multi-head attention and stacking
+encoder = Encoder(dim_size, num_heads, num_layers)
+decoder = Decoder(vocab_size, dim_size, num_heads, num_layers)
 
 # Move models to GPU if available
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -75,7 +77,7 @@ dataloader = DataLoader(ds, batch_size=batch_size, shuffle=True)
 # Define loss function and optimizer
 criterion = nn.CrossEntropyLoss()
 optimizer = optim.Adam(
-    list(encoder.parameters()) + list(decoder.parameters()), lr=0.001
+    list(encoder.parameters()) + list(decoder.parameters()), lr=wandb.config["learning_rate"]
 )
 
 # Training loop for multiple batches
